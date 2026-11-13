@@ -175,6 +175,15 @@ def test_register_declares_delivery_hooks():
     assert Platform("donut").value == "donut"
 
 
+def test_tool_progress_defaults_on_and_user_config_wins():
+    from gateway.display_config import resolve_display_setting
+    assert resolve_display_setting({}, "donut", "tool_progress") == "all"
+    assert resolve_display_setting({}, "donut", "tool_progress_grouping") == "accumulate"
+    off = {"display": {"platforms": {"donut": {"tool_progress": "off"}}}}
+    assert resolve_display_setting(off, "donut", "tool_progress") == "off"
+    assert resolve_display_setting({"display": {"tool_progress": "off"}}, "donut", "tool_progress") == "off"
+
+
 async def test_stream_events_become_threaded_message_events(fake, make_adapter):
     fake.frames = [_message_new(), _message_new()]  # duplicate event_id is dropped
     stream = await fake.start_stream()
@@ -223,6 +232,15 @@ async def test_thread_reply_gets_root_context_once(make_adapter):
     assert first.reply_to_text == "Fix the scroll bug" and first.reply_to_author_name == "alice"
     assert second.reply_to_text is None
     assert adapter._replies["602"] == ("7", "501")
+
+
+async def test_mention_before_command_is_stripped(make_adapter):
+    adapter = await make_adapter()
+    await adapter._handle_frame(json.dumps(_message_new("a", "@hermes /approve", mentions_bot=True)))
+    await adapter._handle_frame(json.dumps(_message_new("b", "@hermes look at /tmp/x", mentions_bot=True)))
+    assert adapter.events[0].text == "/approve"
+    assert adapter.events[0].message_type.name == "COMMAND"
+    assert adapter.events[1].text == "@hermes look at /tmp/x"
 
 
 async def test_bot_senders_are_marked(make_adapter):
