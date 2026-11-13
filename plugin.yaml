@@ -1,0 +1,36 @@
+name: donut
+label: DonutChat
+kind: platform
+version: 0.1.0
+description: >
+  DonutChat gateway adapter for Hermes Agent. Answers DonutChat messages in
+  threads over the bot event stream and bot API, and delivers results of
+  long-running work (background processes, async delegation, cron,
+  send_message) into the same thread.
+author: DonutChat
+requires_env:
+  - name: DONUT_BOT_TOKEN
+    description: "DonutChat bot token (donutbot_…), from Settings → My bots"
+    prompt: "Bot token"
+    password: true
+optional_env:
+  - name: DONUT_ALLOWED_USERS
+    description: "Comma-separated DonutChat user IDs allowed to talk to Hermes"
+    prompt: "Allowed user IDs (comma-separated)"
+    password: false
+  - name: DONUT_ALLOW_ALL_USERS
+    description: "Allow everyone the bot's trigger mode lets through (true/false)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: DONUT_HOME_CHANNEL
+    description: "Chat ID for cron and notification delivery"
+    prompt: "Home chat ID (or empty)"
+    password: false
+  - name: DONUT_API_URL
+    description: "Bot API base URL (default https://api.donutchat.com/bots/v1)"
+    prompt: "Bot API URL (or empty)"
+    password: false
+  - name: DONUT_STREAM_URL
+    description: "Event stream URL (default derived from DONUT_API_URL)"
+    prompt: "Stream URL (or empty)"
+    password: false
