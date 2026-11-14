@@ -84,12 +84,18 @@ through off, new, all and verbose, and saves the choice for DonutChat.
 - **Attachments:** files are fetched through the authenticated attachment endpoint, without following
   redirects, and handed to Hermes as images or documents.
 
+## Files from Hermes
+
+Hermes can attach images (PNG, JPEG, GIF, WebP), PDFs and UTF-8 text files of up to 10 MiB to its replies,
+for example with `MEDIA:/path/to/screenshot.png`. DonutChat accepts them only after the bot's owner turns
+on **Allow file uploads** in the bot's settings in the iPhone, Android or desktop app. Until then, and for
+other file types, Hermes posts a short notice instead of the file.
+
 ## Limits
 
-- Hermes can't upload files to DonutChat yet, because the bot API has no upload endpoint. Media replies
-  fall back to text.
-- Top-level bot messages can't be edited, so streaming only happens inside threads. Every agent reply
-  is in a thread.
+- Files attach only to thread replies. Every agent reply is in a thread, so this matters only for cron
+  results posted to the home chat, which arrive as text.
+- Top-level bot messages can't be edited, so streaming only happens inside threads.
 
 ## Development
 

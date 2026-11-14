@@ -46,6 +46,14 @@ CTX = _Ctx()
 adapter_mod.register(CTX)
 
 
+def _parse_multipart(content_type, raw):
+    from email.parser import BytesParser
+    from email.policy import HTTP
+    msg = BytesParser(policy=HTTP).parsebytes(b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + raw)
+    return [(part.get_param("name", header="content-disposition"), part.get_filename(),
+             part.get_payload(decode=True)) for part in msg.iter_parts()]
+
+
 class FakeDonut:
     """Bot REST API on a thread + event stream on the test loop."""
 
@@ -54,6 +62,8 @@ class FakeDonut:
         self.frames = []  # sent to each stream connection after it opens
         self.stream_queries = []
         self.attachments = {}  # path → bytes
+        self.uploads = []  # parsed multipart posts
+        self.uploads_enabled = True
         self.next_id = 1000
         fake = self
 
@@ -81,7 +91,15 @@ class FakeDonut:
                 self._reply(404, {"ok": False, "error": "not_found"})
 
             def do_POST(self):
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                raw = self.rfile.read(int(self.headers["Content-Length"]))
+                if self.headers.get("Content-Type", "").startswith("multipart/form-data"):
+                    parts = _parse_multipart(self.headers["Content-Type"], raw)
+                    fake.uploads.append(parts)
+                    if not fake.uploads_enabled:
+                        return self._reply(403, {"ok": False, "error": "uploads_disabled"})
+                    fake.next_id += 1
+                    return self._reply(200, {"ok": True, "reply_id": fake.next_id})
+                body = json.loads(raw)
                 fake.requests.append((self.path, body, self.headers.get("Authorization")))
                 fake.next_id += 1
                 if self.path == "/bots/v1/thread-replies":
@@ -320,3 +338,32 @@ async def test_standalone_send_posts_into_thread(fake, monkeypatch):
     result = await adapter_mod._standalone_send(PlatformConfig(enabled=True), "7", "cron done", thread_id="501")
     assert result["success"]
     assert fake.posts("thread-replies")[-1]["parent_message_id"] == 501
+
+
+async def test_files_upload_into_the_thread(fake, make_adapter, tmp_path):
+    adapter = await make_adapter()
+    assert await adapter.connect()
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+
+    result = await adapter.send_image_file("7", str(shot), caption="Here it is", metadata={"thread_id": "501"})
+    assert result.success
+    (payload_part, file_part), = fake.uploads
+    assert payload_part[0] == "payload"
+    assert json.loads(payload_part[2]) == {"chat_id": 7, "parent_message_id": 501, "content": "Here it is",
+                                           "content_type": "MD", "status": "OK"}
+    assert file_part[:2] == ("file", "shot.png") and file_part[2] == shot.read_bytes()
+    assert adapter._replies[result.message_id] == ("7", "501")
+
+    # Uploads not allowed by the owner: falls back to Hermes' notice instead of failing silently.
+    fake.uploads_enabled = False
+    doc = tmp_path / "report.pdf"
+    doc.write_bytes(b"%PDF-1.7\n")
+    fallback = await adapter.send_document("7", str(doc), metadata={"thread_id": "501"})
+    assert len(fake.uploads) == 2
+    assert fake.posts("thread-replies"), "the fallback notice is posted as a normal reply"
+
+    # No thread (e.g. home channel): no upload attempt.
+    await adapter.send_document("7", str(doc))
+    assert len(fake.uploads) == 2
+    await adapter.disconnect()

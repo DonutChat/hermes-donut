@@ -46,6 +46,7 @@ DEFAULT_API_URL = "https://api.donutchat.com/bots/v1"
 MAX_REPLY_BYTES = 79_000  # the API accepts 80,000 UTF-8 bytes per message or reply
 MAX_ATTACHMENTS = 8
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # DonutChat's per-file limit for bot uploads
 KEEPALIVE_SECONDS = 60  # the server drops a socket that sends nothing for 5 minutes
 _RECONNECT_BASE, _RECONNECT_MAX = 1.0, 60.0
 _LEADING_MENTIONS_BEFORE_COMMAND = re.compile(r"^\s*(?:@\S+\s+)+(?=/)")
@@ -246,7 +247,53 @@ class DonutAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return dict(self._chats.get(str(chat_id)) or {"name": str(chat_id), "type": "group"})
 
-    # ponytail: no bot file-upload API yet, so media sends use the base text fallback.
+    # --- Files ---
+    # DonutChat accepts files only on a thread reply, and only when the bot's owner turned on
+    # "Allow file uploads". Anything it refuses falls back to Hermes' text notice.
+
+    async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None,
+                              reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None,
+                              **kwargs) -> SendResult:
+        result = await self._send_file(chat_id, image_path, None, caption, reply_to, metadata)
+        return result or await super().send_image_file(chat_id, image_path, caption, reply_to, metadata, **kwargs)
+
+    async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
+                            file_name: Optional[str] = None, reply_to: Optional[str] = None,
+                            metadata: Optional[dict[str, Any]] = None, **kwargs) -> SendResult:
+        result = await self._send_file(chat_id, file_path, file_name, caption, reply_to, metadata)
+        return result or await super().send_document(
+            chat_id, file_path, caption, file_name, reply_to, metadata, **kwargs)
+
+    async def _send_file(self, chat_id: str, path: str, file_name: Optional[str], caption: Optional[str],
+                         reply_to: Optional[str], metadata: Optional[dict]) -> Optional[SendResult]:
+        """Upload one file as a thread reply. None means "not delivered, use the fallback"."""
+        thread = self._thread_of(reply_to, metadata)
+        if self._http is None or not thread:
+            return None
+        try:
+            p = Path(path)
+            if not p.is_file() or p.stat().st_size > MAX_UPLOAD_BYTES:
+                return None
+            data = await asyncio.to_thread(p.read_bytes)
+        except OSError:
+            return None
+        payload = {"chat_id": int(chat_id), "parent_message_id": int(thread),
+                   "content": _fit(caption or ""), "content_type": "MD", "status": "OK"}
+        try:
+            resp = await self._http.post(f"{self._api}/thread-replies", data={"payload": json.dumps(payload)},
+                                         files={"file": (Path(file_name or p.name).name, data)})
+            body = resp.json() if resp.content else {}
+        except Exception as exc:
+            logger.warning("DonutChat: file upload failed: %s", exc)
+            return None
+        if resp.status_code != 200 or not body.get("ok"):
+            # uploads_disabled: the owner hasn't allowed uploads. unsupported_file_type: not an
+            # image, PDF or text file. Both are expected; the fallback tells the user.
+            logger.info("DonutChat: file not uploaded (%s %s)", resp.status_code, body.get("error"))
+            return None
+        reply_id = str(body["reply_id"])
+        self._replies[reply_id] = (str(chat_id), thread)
+        return SendResult(success=True, message_id=reply_id)
 
     # --- Inbound ---
 
@@ -505,7 +552,9 @@ _PLATFORM_HINT = (
     "your replies are posted in it as Markdown (headings, lists, tables and code blocks render). "
     "For long work, start background processes or async delegation instead of blocking: when "
     "they finish you are woken in this same thread and your reply is delivered there, so you can "
-    "say you will report back and actually do it.")
+    "say you will report back and actually do it. To attach an image (PNG, JPEG, GIF, WebP), a PDF "
+    "or a text file of up to 10 MB, include MEDIA:/absolute/path/to/file in your reply; this works "
+    "only if the bot's owner allowed file uploads, otherwise the user sees a notice instead.")
 
 
 def register(ctx) -> None:
