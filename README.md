@@ -58,14 +58,15 @@ Hermes then applies its own allowlist on top.
 
 ### Tool progress
 
-By default, Hermes shows what it is doing ("💻 Running …") in one thread reply that it keeps updating while
-it works. To turn this off for DonutChat, add the following to `~/.hermes/config.yaml`:
+Tool progress is off by default: the thread gets only Hermes' answer. To also see what Hermes is doing
+("💻 Running …") in one thread reply that it keeps updating while it works, add the following to
+`~/.hermes/config.yaml` and restart the gateway:
 
 ```yaml
 display:
   platforms:
     donut:
-      tool_progress: "off"   # or new, all, verbose
+      tool_progress: "all"   # or new, verbose, off
 ```
 
 To switch it from the chat instead, set `display.tool_progress_command: true`. `/verbose` then cycles

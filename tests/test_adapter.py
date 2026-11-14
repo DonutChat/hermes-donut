@@ -175,13 +175,13 @@ def test_register_declares_delivery_hooks():
     assert Platform("donut").value == "donut"
 
 
-def test_tool_progress_defaults_on_and_user_config_wins():
+def test_tool_progress_defaults_off_and_user_config_wins():
     from gateway.display_config import resolve_display_setting
-    assert resolve_display_setting({}, "donut", "tool_progress") == "all"
+    assert resolve_display_setting({}, "donut", "tool_progress") == "off"
     assert resolve_display_setting({}, "donut", "tool_progress_grouping") == "accumulate"
-    off = {"display": {"platforms": {"donut": {"tool_progress": "off"}}}}
-    assert resolve_display_setting(off, "donut", "tool_progress") == "off"
-    assert resolve_display_setting({"display": {"tool_progress": "off"}}, "donut", "tool_progress") == "off"
+    on = {"display": {"platforms": {"donut": {"tool_progress": "all"}}}}
+    assert resolve_display_setting(on, "donut", "tool_progress") == "all"
+    assert resolve_display_setting({"display": {"tool_progress": "new"}}, "donut", "tool_progress") == "new"
 
 
 async def test_stream_events_become_threaded_message_events(fake, make_adapter):
