@@ -568,9 +568,9 @@ def register(ctx) -> None:
         cron_deliver_env_var="DONUT_HOME_CHANNEL", standalone_sender_fn=_standalone_send,
         allowed_users_env="DONUT_ALLOWED_USERS", allow_all_env="DONUT_ALLOW_ALL_USERS",
         max_message_length=20_000, emoji="🍩", allow_update_command=True,
-        # Tool progress on by default, accumulated in one edited reply. Only a default: users turn it
-        # off with display.platforms.donut.tool_progress: off (or /verbose when
+        # Tool progress off by default; streaming and other high-tier defaults stay. Only a default:
+        # users turn it on with display.platforms.donut.tool_progress: all (or /verbose when
         # display.tool_progress_command is true).
-        display_tier="high",
+        display_tier="high", display_overrides={"tool_progress": "off"},
         dashboard_description="Answer DonutChat messages in threads, including results of long-running work.",
         docs_url="https://github.com/DonutChat/hermes-donut", platform_hint=_PLATFORM_HINT)
