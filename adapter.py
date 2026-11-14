@@ -25,6 +25,7 @@ import json
 import logging
 import mimetypes
 import random
+import re
 from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any, Optional
@@ -47,6 +48,7 @@ MAX_ATTACHMENTS = 8
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 KEEPALIVE_SECONDS = 60  # the server drops a socket that sends nothing for 5 minutes
 _RECONNECT_BASE, _RECONNECT_MAX = 1.0, 60.0
+_LEADING_MENTIONS_BEFORE_COMMAND = re.compile(r"^\s*(?:@\S+\s+)+(?=/)")
 _DM_TYPES = {"direct", "self"}
 _HUMAN_KINDS = {"user", ""}
 
@@ -336,6 +338,9 @@ class DonutAdapter(BasePlatformAdapter):
         chat_id = str(int(data["chat_id"]))
         sender = data.get("sender") or {}
         text = data.get("text") or ""
+        if data.get("mentions_bot"):
+            # "@bot /approve": in When-mentioned mode commands must carry the mention to arrive at all.
+            text = _LEADING_MENTIONS_BEFORE_COMMAND.sub("", text, count=1)
         attachments = data.get("attachments") or []
         if not text.strip() and not attachments:
             return
@@ -350,6 +355,9 @@ class DonutAdapter(BasePlatformAdapter):
             self._replies[message_id] = (chat_id, thread_id)
         self._remember_chat(chat_id, data.get("chat_name"), data.get("chat_type"))
         chat = self._chats[chat_id]
+        # Shown so owners can find the ID to put in DONUT_ALLOWED_USERS.
+        logger.info("DonutChat: message from %s (user ID %s) in chat %s",
+                    sender.get("name") or "?", sender.get("id"), chat_id)
 
         media_urls, media_types = await self._download_attachments(attachments, source_path)
         event = MessageEvent(
@@ -511,5 +519,9 @@ def register(ctx) -> None:
         cron_deliver_env_var="DONUT_HOME_CHANNEL", standalone_sender_fn=_standalone_send,
         allowed_users_env="DONUT_ALLOWED_USERS", allow_all_env="DONUT_ALLOW_ALL_USERS",
         max_message_length=20_000, emoji="🍩", allow_update_command=True,
+        # Tool progress on by default, accumulated in one edited reply. Only a default: users turn it
+        # off with display.platforms.donut.tool_progress: off (or /verbose when
+        # display.tool_progress_command is true).
+        display_tier="high",
         dashboard_description="Answer DonutChat messages in threads, including results of long-running work.",
         docs_url="https://github.com/DonutChat/hermes-donut", platform_hint=_PLATFORM_HINT)

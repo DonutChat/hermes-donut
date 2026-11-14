@@ -56,6 +56,21 @@ event stream per bot, and two clients keep disconnecting each other.
 Which messages reach Hermes is decided in DonutChat by the bot's trigger mode, for example mentions only.
 Hermes then applies its own allowlist on top.
 
+### Tool progress
+
+By default, Hermes shows what it is doing ("💻 Running …") in one thread reply that it keeps updating while
+it works. To turn this off for DonutChat, add the following to `~/.hermes/config.yaml`:
+
+```yaml
+display:
+  platforms:
+    donut:
+      tool_progress: "off"   # or new, all, verbose
+```
+
+To switch it from the chat instead, set `display.tool_progress_command: true`. `/verbose` then cycles
+through off, new, all and verbose, and saves the choice for DonutChat.
+
 ## How it works
 
 - **Inbound:** the plugin reads `message.new` and `thread.reply.new` from `wss://…/bots/v1/stream`. It
