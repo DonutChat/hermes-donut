@@ -72,6 +72,13 @@ display:
 To switch it from the chat instead, set `display.tool_progress_command: true`. `/verbose` then cycles
 through off, new, all and verbose, and saves the choice for DonutChat.
 
+Status messages that Hermes writes between tool calls ("Retrying the iOS job once…") are also off by
+default. To get them, set `interim_assistant_messages: true` in the same `donut:` block. Each one ends
+the current progress reply, so the next tools start a new one below it.
+
+A global `display.tool_progress` or `display.interim_assistant_messages` replaces these defaults for
+every platform, DonutChat included.
+
 ## How it works
 
 - **Inbound:** the plugin reads `message.new` and `thread.reply.new` from `wss://…/bots/v1/stream`. It

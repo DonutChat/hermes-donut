@@ -73,8 +73,28 @@ def _token(config=None) -> str:
             or extra.get("token") or "").strip()
 
 
+def _hard_breaks(text: str) -> str:
+    """End each line followed by text with two spaces, so DonutChat shows the line break.
+
+    DonutChat renders Markdown soft breaks as spaces, which collapses progress bubbles
+    ("💻 Running …" per line) and chat-style answers into one line. Fenced code is left as is.
+    Idempotent."""
+    lines = text.split("\n")
+    fence = None
+    for i, line in enumerate(lines[:-1]):
+        marker = line.lstrip()[:3]
+        if marker in ("```", "~~~"):
+            fence = None if fence == marker else (fence or marker)
+            continue
+        if fence or not line.strip() or not lines[i + 1].strip() or line.endswith(("  ", "\\")):
+            continue
+        lines[i] = line + "  "
+    return "\n".join(lines)
+
+
 def _fit(text: str) -> str:
-    """Trim to the API's byte limit on a UTF-8 boundary."""
+    """Keep line breaks visible, then trim to the API's byte limit on a UTF-8 boundary."""
+    text = _hard_breaks(text)
     data = text.encode()
     return text if len(data) <= MAX_REPLY_BYTES else data[:MAX_REPLY_BYTES].decode(errors="ignore")
 
@@ -202,7 +222,8 @@ class DonutAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         thread = self._thread_of(reply_to, metadata)
         result = SendResult(success=True)
-        for chunk in self.truncate_message(content, MAX_REPLY_BYTES, len_fn=_byte_len):
+        # Convert before chunking so the added spaces count toward each chunk's byte limit.
+        for chunk in self.truncate_message(_hard_breaks(content), MAX_REPLY_BYTES, len_fn=_byte_len):
             try:
                 if thread:
                     data = await self._post("thread-replies", {
@@ -568,9 +589,11 @@ def register(ctx) -> None:
         cron_deliver_env_var="DONUT_HOME_CHANNEL", standalone_sender_fn=_standalone_send,
         allowed_users_env="DONUT_ALLOWED_USERS", allow_all_env="DONUT_ALLOW_ALL_USERS",
         max_message_length=20_000, emoji="🍩", allow_update_command=True,
-        # Tool progress off by default; streaming and other high-tier defaults stay. Only a default:
-        # users turn it on with display.platforms.donut.tool_progress: all (or /verbose when
-        # display.tool_progress_command is true).
-        display_tier="high", display_overrides={"tool_progress": "off"},
+        # Tool progress and mid-turn status messages off by default, so a thread gets only the answer;
+        # streaming and other high-tier defaults stay. Only defaults: users turn them on with
+        # display.platforms.donut.tool_progress: all / interim_assistant_messages: true (or /verbose
+        # when display.tool_progress_command is true).
+        display_tier="high",
+        display_overrides={"tool_progress": "off", "interim_assistant_messages": False},
         dashboard_description="Answer DonutChat messages in threads, including results of long-running work.",
         docs_url="https://github.com/DonutChat/hermes-donut", platform_hint=_PLATFORM_HINT)

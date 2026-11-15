@@ -202,6 +202,22 @@ def test_tool_progress_defaults_off_and_user_config_wins():
     assert resolve_display_setting({"display": {"tool_progress": "new"}}, "donut", "tool_progress") == "new"
 
 
+def test_interim_messages_default_off_and_user_config_wins():
+    from gateway.display_config import resolve_display_setting
+    assert resolve_display_setting({}, "donut", "interim_assistant_messages") is False
+    on = {"display": {"platforms": {"donut": {"interim_assistant_messages": True}}}}
+    assert resolve_display_setting(on, "donut", "interim_assistant_messages") is True
+
+
+def test_hard_breaks_keep_lines_but_not_code_or_paragraphs():
+    hb = adapter_mod._hard_breaks
+    assert hb("💻 Running a\n📚 Reading b\n🐍 Running c") == "💻 Running a  \n📚 Reading b  \n🐍 Running c"
+    assert hb("para one\n\npara two") == "para one\n\npara two"
+    code = "```\nx = 1\ny = 2\n```"
+    assert hb("intro\n" + code) == "intro  \n" + code
+    assert hb(hb("a\nb")) == "a  \nb"
+
+
 async def test_stream_events_become_threaded_message_events(fake, make_adapter):
     fake.frames = [_message_new(), _message_new()]  # duplicate event_id is dropped
     stream = await fake.start_stream()
