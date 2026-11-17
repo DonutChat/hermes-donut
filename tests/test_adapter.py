@@ -383,3 +383,108 @@ async def test_files_upload_into_the_thread(fake, make_adapter, tmp_path):
     await adapter.send_document("7", str(doc))
     assert len(fake.uploads) == 2
     await adapter.disconnect()
+
+
+@pytest.fixture
+def home_config(tmp_path, monkeypatch):
+    from hermes_cli import config
+    path = tmp_path / "config.yaml"
+    monkeypatch.setattr(config, "get_config_path", lambda: path)
+    monkeypatch.delenv("DONUT_HOME_CHANNEL", raising=False)
+    return path
+
+
+@pytest.mark.parametrize("in_thread", [False, True])
+async def test_first_authorized_message_sets_main_chat_home(make_adapter, home_config, in_thread):
+    from gateway.config import HomeChannel
+    from hermes_cli.config import load_config
+    adapter = await make_adapter()
+    adapter.set_authorization_check(lambda *args, **kwargs: True)
+    frame = _thread_reply("home", 601) if in_thread else _message_new()
+    await adapter._handle_frame(json.dumps(frame))
+    home = adapter.config.home_channel
+    assert isinstance(home, HomeChannel)
+    assert home.chat_id == "7"
+    assert home.thread_id is None  # notices go to the main chat, not the triggering thread
+    assert load_config()["platforms"]["donut"]["home_channel"] == home.to_dict()
+    assert adapter.events[0].source.thread_id == "501"  # normal answers stay threaded
+    await adapter._handle_frame(json.dumps(_message_new("other", chat_id=8)))
+    assert adapter.config.home_channel.chat_id == "7"
+
+
+@pytest.mark.parametrize("authorization", [False, None])
+async def test_home_not_set_without_authorization(make_adapter, home_config, authorization):
+    adapter = await make_adapter()
+    adapter.set_authorization_check(lambda *args, **kwargs: authorization)
+    await adapter._handle_frame(json.dumps(_message_new()))
+    assert adapter.config.home_channel is None
+    assert not home_config.exists()
+
+
+async def test_home_respects_admin_policy_and_ignores_bots(make_adapter, home_config):
+    adapter = await make_adapter()
+    adapter.set_authorization_check(lambda *args, **kwargs: True)
+    adapter.config.extra["group_allow_admin_from"] = ["99"]
+    await adapter._handle_frame(json.dumps(_message_new()))
+    assert not home_config.exists()
+    adapter.config.extra.clear()
+    await adapter._handle_frame(json.dumps(_message_new("bot", sender={"id": 99, "kind": "bot"})))
+    assert not home_config.exists()
+
+
+@pytest.mark.parametrize("existing", ["config", "env"])
+async def test_explicit_home_is_preserved(make_adapter, home_config, monkeypatch, existing):
+    from gateway.config import HomeChannel, Platform
+    adapter = await make_adapter()
+    adapter.set_authorization_check(lambda *args, **kwargs: True)
+    if existing == "config":
+        adapter.config.home_channel = HomeChannel(Platform("donut"), "88", "Chosen", thread_id="89")
+    else:
+        monkeypatch.setenv("DONUT_HOME_CHANNEL", "88")
+    await adapter._handle_frame(json.dumps(_message_new()))
+    assert not home_config.exists()
+    if existing == "config":
+        assert adapter.config.home_channel.chat_id == "88"
+        assert adapter.config.home_channel.thread_id == "89"
+
+
+async def test_home_save_failure_does_not_drop_request(make_adapter, home_config, monkeypatch):
+    from gateway import config
+    adapter = await make_adapter()
+    adapter.set_authorization_check(lambda *args, **kwargs: True)
+    def fail(*args, **kwargs):
+        raise OSError("read-only config")
+    monkeypatch.setattr(config, "persist_home_channel", fail)
+    await adapter._handle_frame(json.dumps(_message_new()))
+    assert len(adapter.events) == 1
+    assert adapter.config.home_channel is None
+
+
+async def test_saved_home_reloads_and_delivers_to_main_chat(fake, make_adapter, home_config):
+    from gateway.config import PlatformConfig
+    from hermes_cli.config import load_config
+    adapter = await make_adapter()
+    adapter.set_authorization_check(lambda *args, **kwargs: True)
+    await adapter._handle_frame(json.dumps(_thread_reply("home", 601)))
+    restored = PlatformConfig.from_dict(load_config()["platforms"]["donut"])
+    restarted = adapter_mod.DonutAdapter(restored)
+    restarted._acquire_platform_lock = lambda *args: True
+    restarted._release_platform_lock = lambda: None
+    try:
+        assert await restarted.connect()
+        home = restarted.config.home_channel
+        assert home.chat_id == "7" and home.thread_id is None
+        result = await restarted.send(home.chat_id, "Scheduled result", metadata={"thread_id": home.thread_id})
+        assert result.success
+        assert fake.posts("messages")[0]["chat_id"] == 7
+        assert not fake.posts("thread-replies")
+    finally:
+        await restarted.disconnect()
+
+
+async def test_manual_sethome_still_reaches_gateway(make_adapter, home_config):
+    adapter = await make_adapter()
+    adapter.set_authorization_check(lambda *args, **kwargs: True)
+    await adapter._handle_frame(json.dumps(_message_new(text="/sethome")))
+    assert adapter.events[0].get_command() == "sethome"
+    assert not home_config.exists()  # the gateway handles the explicit command and its target

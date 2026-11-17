@@ -450,7 +450,34 @@ class DonutAdapter(BasePlatformAdapter):
                   for ref in data.get("linked_messages") or []]
         if linked:
             event.channel_context = "\n".join(linked)
+        self._ensure_default_home(event)
         await self.handle_message(event)
+
+    def _ensure_default_home(self, event: MessageEvent) -> None:
+        """Default notices to the first authorized user's main chat, once per platform."""
+        source = event.source
+        if (self.config.home_channel or get_scoped_secret("DONUT_HOME_CHANNEL", "")
+                or source.is_bot or event.get_command() == "sethome"):
+            return
+        # Setting a delivery destination is a side effect: unknown authorization is
+        # insufficient, and the same admin policy as /sethome must permit it.
+        if self._is_sender_authorized(source.user_id, source.chat_type, source.chat_id,
+                                      thread_id=source.thread_id) is not True:
+            return
+        from gateway.slash_access import policy_for_chat_type
+        if not policy_for_chat_type(self.config.extra, source.chat_type).can_run(source.user_id, "sethome"):
+            return
+        try:
+            from gateway.config import HomeChannel, persist_home_channel
+            home = HomeChannel(platform=self.platform, chat_id=source.chat_id,
+                               name=source.chat_name or source.chat_id)
+            # No thread_id: cron and cross-platform notices belong in the main chat.
+            # YAML is canonical for /sethome and is read again after a restart.
+            persist_home_channel(home)
+            self.config.home_channel = home
+        except Exception:
+            # A read-only config must not prevent the original request from running.
+            logger.warning("DonutChat: could not save default home chat", exc_info=True)
 
     async def _download_attachments(self, attachments: list, source_path: str) -> tuple[list[str], list[str]]:
         """Fetch attachment bytes through the authenticated content endpoint into Hermes' media cache."""

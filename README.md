@@ -28,7 +28,7 @@ Then add the bot token to `~/.hermes/.env`, either with `hermes gateway setup` o
 ```bash
 DONUT_BOT_TOKEN=donutbot_…
 DONUT_ALLOWED_USERS=123456789      # your DonutChat user ID; comma-separate several
-DONUT_HOME_CHANNEL=987654321       # optional: chat for cron results and notices
+DONUT_HOME_CHANNEL=987654321       # optional: override the automatic home chat
 ```
 
 Restart the gateway:
@@ -49,7 +49,7 @@ event stream per bot, and two clients keep disconnecting each other.
 | `DONUT_BOT_TOKEN` | required | Bot token from DonutChat → Settings → My bots |
 | `DONUT_ALLOWED_USERS` | none | DonutChat user IDs allowed to talk to Hermes |
 | `DONUT_ALLOW_ALL_USERS` | `false` | Answer everyone the bot's trigger mode lets through |
-| `DONUT_HOME_CHANNEL` | none | Chat ID for cron delivery; also settable with `/sethome` |
+| `DONUT_HOME_CHANNEL` | automatic | Chat ID for cron delivery; also settable with `/sethome` |
 | `DONUT_API_URL` | `https://api.donutchat.com/bots/v1` | Bot API base |
 | `DONUT_STREAM_URL` | derived from `DONUT_API_URL` | Event stream URL |
 
@@ -81,6 +81,10 @@ every platform, DonutChat included.
 
 ## How it works
 
+- **Home chat:** the first authorized human message sets its main chat as the home for cron results
+  and notices, even when that message is in a thread. This is saved in Hermes configuration and
+  survives restarts. An existing home is preserved; use `/sethome` or `DONUT_HOME_CHANNEL` to choose
+  another destination. Where command access is restricted, the user must be allowed to run `/sethome`.
 - **Inbound:** the plugin reads `message.new` and `thread.reply.new` from `wss://…/bots/v1/stream`. It
   de-duplicates by `event_id` and resumes with `last_event_id` after a reconnect.
 - **Threads:** a top-level message starts a thread under itself. Every thread is its own Hermes session.
