@@ -555,3 +555,9 @@ async def test_real_gateway_delivery_localizes_progress_without_translating_comm
         assert all(command in body for body in by_thread.values())
     finally:
         await adapter.disconnect()
+
+
+def test_hermes_installer_discovers_language_dependency():
+    from pm.plugin_declarations import read_python_declaration
+    declaration = read_python_declaration(ROOT)
+    assert "langdetect>=1.0.9,<2" in declaration.install_requirements
