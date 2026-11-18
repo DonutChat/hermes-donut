@@ -107,6 +107,10 @@ every platform, DonutChat included.
 - **Threads:** a top-level message starts a thread under itself. Every thread is its own Hermes session.
   The thread's root message is passed to Hermes once, as reply context, and linked messages are passed as
   channel context.
+- **Typing:** thread starts, refreshes, and clears send the exact root as `parent_message_id` to
+  `POST /typing`. A chat-level indicator omits that field. Deploy the DonutChat API with support for
+  `parent_message_id` on both start and stop before updating this plugin: an older API may ignore the
+  field and still publish chat-level typing.
 - **Outbound:** replies are created with `POST /thread-replies`. Streamed answers are edits through
   `POST /thread-replies/stream`. A message with no thread, such as a cron result in the home chat, uses
   `POST /messages`. Answers are split to stay under the 80,000-byte limit.
