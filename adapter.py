@@ -49,6 +49,7 @@ MAX_ATTACHMENTS = 8
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # DonutChat's per-file limit for bot uploads
 KEEPALIVE_SECONDS = 60  # the server drops a socket that sends nothing for 5 minutes
+_TYPING_TIMEOUT = 1.0  # best effort; a slow presence API must not hold up turn cleanup
 _RECONNECT_BASE, _RECONNECT_MAX = 1.0, 60.0
 _LEADING_MENTIONS_BEFORE_COMMAND = re.compile(r"^\s*(?:@\S+\s+)+(?=/)")
 _DM_TYPES = {"direct", "self"}
@@ -118,6 +119,14 @@ class _Bounded(OrderedDict):
             self.popitem(last=False)
 
 
+class _TypingScope(str):
+    """Internal pause key for a single (chat, root) using Hermes' string-keyed lifecycle."""
+
+    def __new__(cls, chat_id: str, root=None):
+        root = "" if root is None else str(root).lstrip("0")
+        return super().__new__(cls, f"{chat_id}:{root}")
+
+
 class DonutAdapter(BasePlatformAdapter):
     """Gateway adapter for DonutChat bots."""
 
@@ -140,6 +149,7 @@ class DonutAdapter(BasePlatformAdapter):
         self._threads_seen: _Bounded = _Bounded(5000)  # threads whose root text Hermes was given
         self._languages: _Bounded = _Bounded(2000)  # (chat, thread, sender) → language
         self._chats: _Bounded = _Bounded(2000)  # chat_id → {"name", "type"}
+        self._typing_turns: dict[asyncio.Task, tuple[_TypingScope, Optional[asyncio.Event]]] = {}
 
     @property
     def name(self) -> str:
@@ -257,15 +267,71 @@ class DonutAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(exc))
         return SendResult(success=True, message_id=str(message_id))
 
-    async def send_typing(self, chat_id: str, metadata=None) -> None:
-        if self._http is not None:
-            with contextlib.suppress(Exception):
-                await self._post("typing", {"chat_id": int(chat_id)})
+    async def _set_typing(self, chat_id: str, metadata, *, is_typing: bool) -> None:
+        if self._http is None or (is_typing and self._closing):
+            return
+        with contextlib.suppress(Exception):
+            # Base lifecycle methods use a scope key; direct gateway calls pass source metadata.
+            scope = chat_id if isinstance(chat_id, _TypingScope) else _TypingScope(
+                str(int(chat_id)), (metadata or {}).get("thread_id"))
+            chat_id, _, root = scope.partition(":")
+            if is_typing and (chat_id in self._typing_paused or scope in self._typing_paused):
+                return
+            body = {"chat_id": int(chat_id), "is_typing": is_typing}
+            if root:
+                # Malformed thread metadata must not act on the main chat or another root.
+                if not re.fullmatch(r"[0-9]+", root) or not 0 < int(root) < 2 ** 63:
+                    return
+                body["parent_message_id"] = int(root)
+            async with asyncio.timeout(_TYPING_TIMEOUT):
+                await self._post("typing", body)
 
-    async def stop_typing(self, chat_id: str) -> None:
-        if self._http is not None:
-            with contextlib.suppress(Exception):
-                await self._post("typing", {"chat_id": int(chat_id), "is_typing": False})
+    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        await self._set_typing(chat_id, metadata, is_typing=True)
+
+    async def stop_typing(self, chat_id: str, metadata=None) -> None:
+        await self._set_typing(chat_id, metadata, is_typing=False)
+
+    async def _keep_typing(self, chat_id: str, interval: float = 2.0, metadata=None,
+                           stop_event: Optional[asyncio.Event] = None) -> None:
+        scope = _TypingScope(chat_id, (metadata or {}).get("thread_id"))
+        await super()._keep_typing(scope, interval=interval, metadata=metadata, stop_event=stop_event)
+
+    async def _stop_typing_refresh(self, chat_id: str, typing_task=None, *, metadata=None, **kwargs) -> None:
+        scope = _TypingScope(chat_id, (metadata or {}).get("thread_id"))
+        await super()._stop_typing_refresh(scope, typing_task, metadata=metadata, **kwargs)
+
+    async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        scope = _TypingScope(event.source.chat_id, event.source.thread_id)
+        self._typing_turns[task] = (scope, self._active_sessions.get(session_key))
+        try:
+            await super()._process_message_background(event, session_key)
+        finally:
+            self._typing_turns.pop(task, None)
+
+    def pause_typing_for_chat(self, chat_id: str) -> None:
+        # Hermes pauses before final delivery, which can stall as other threads keep working.
+        # Only that turn's pause is scoped; non-turn calls (e.g. approval workers) stay chat-wide.
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:  # called from a synchronous worker without an event loop
+            task = None
+        turn = self._typing_turns.get(task) if task is not None else None
+        scope = turn[0] if turn and turn[0].partition(":")[0] == chat_id else chat_id
+        super().pause_typing_for_chat(scope)
+
+    async def interrupt_session_activity(self, session_key: str, chat_id: str, metadata=None) -> None:
+        # A busy /stop installs a command guard before dispatch. Stop the original refresh as
+        # well, even if the confirmation takes time to send before Hermes cancels the turn task.
+        task = self._session_tasks.get(session_key)
+        turn = self._typing_turns.get(task) if task is not None else None
+        if turn:
+            chat_id, original_guard = turn
+            if original_guard is not None:
+                original_guard.set()
+        await super().interrupt_session_activity(session_key, chat_id, metadata=metadata)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return dict(self._chats.get(str(chat_id)) or {"name": str(chat_id), "type": "group"})

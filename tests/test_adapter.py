@@ -255,6 +255,168 @@ async def test_reconnect_resumes_from_last_event(fake, make_adapter):
     assert fake.stream_queries[0].endswith("?last_event_id=evt_9")
 
 
+async def test_typing_wire_scopes(fake, make_adapter):
+    adapter = await make_adapter(await fake.start_stream())
+    assert await adapter.connect()
+    root = 9223372036854775807
+    try:
+        for metadata in ({"thread_id": str(root)}, None, {"thread_id": "0"}):
+            await adapter.send_typing("7", metadata)
+            await adapter._stop_typing_with_metadata("7", metadata)
+        for invalid in ("wrong", "-1", str(root + 1), float(root), True):
+            await adapter.send_typing("7", {"thread_id": invalid})
+            await adapter.stop_typing("7", {"thread_id": invalid})
+    finally:
+        await adapter.disconnect()
+    expected = [
+        {"chat_id": 7, "is_typing": active, **scope}
+        for scope in ({"parent_message_id": root}, {}, {})
+        for active in (True, False)
+    ]
+    assert [(body, auth) for path, body, auth in fake.requests if path == "/bots/v1/typing"] == [
+        (body, f"Bearer {TOKEN}") for body in expected
+    ]
+
+
+async def _wait_until(predicate):
+    async with asyncio.timeout(5):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.parametrize("outcome", ["complete", "fail", "cancel", "stop"])
+async def test_gateway_typing_lifecycle_is_scoped(fake, make_adapter, monkeypatch, outcome):
+    from gateway.platforms.base import BasePlatformAdapter, _thread_metadata_for_event
+
+    adapter = await make_adapter(await fake.start_stream())
+    adapter.handle_message = BasePlatformAdapter.handle_message.__get__(adapter)
+    root, sibling = 9007199254740993, 9007199254740995
+    release_turn, release_send, in_send = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    hold_others = asyncio.Event()
+    sessions = {}
+    keep_typing, send = adapter._keep_typing, adapter.send
+
+    async def fast_refresh(chat_id, metadata=None, stop_event=None):
+        await keep_typing(chat_id, interval=0.05, metadata=metadata, stop_event=stop_event)
+
+    async def handler(event):
+        key = adapter._event_session_key(event)
+        if event.get_command() == "stop":
+            # Stand in for the runner's authorized stop handler, but exercise the real
+            # base adapter's inline dispatch and command-guard swap.
+            await adapter.interrupt_session_activity(key, event.source.chat_id,
+                                                     metadata=_thread_metadata_for_event(event))
+            return "stopped"
+        scope = int(event.source.thread_id) if event.source.thread_id else None
+        sessions[scope] = adapter._session_tasks[key]
+        if scope != root:
+            await hold_others.wait()
+            return None
+        await release_turn.wait()
+        if outcome == "fail":
+            raise RuntimeError("turn failed")
+        return "finished"
+
+    async def slow_send(chat_id, content, **kwargs):
+        if content in {"finished", "stopped"}:
+            in_send.set()
+            await release_send.wait()
+        return await send(chat_id, content, **kwargs)
+
+    def states(scope):
+        return [body["is_typing"] for body in fake.posts("typing")
+                if body.get("parent_message_id") == scope]
+
+    monkeypatch.setattr(adapter, "_keep_typing", fast_refresh)
+    monkeypatch.setattr(adapter, "send", slow_send)
+    adapter.set_message_handler(handler)
+    assert await adapter.connect()
+    stop_command = None
+    try:
+        # A main-chat source can coexist with threads even though Donut inbound messages
+        # are always threaded. Use the real frame dispatcher for both kinds of thread turn.
+        await adapter.handle_message(adapter_mod.MessageEvent(
+            text="chat", message_type=adapter_mod.MessageType.TEXT,
+            source=adapter.build_source("7", chat_type="group", user_id="9")))
+        await adapter._handle_frame(json.dumps(_message_new("root", message_id=root)))
+        sibling_frame = _thread_reply("sibling", 601)
+        sibling_frame["data"]["parent_message_id"] = sibling
+        await adapter._handle_frame(json.dumps(sibling_frame))
+        await _wait_until(lambda: all(True in states(scope) for scope in (None, root, sibling)))
+
+        if outcome == "stop":
+            stop_frame = _thread_reply("stop", 602, "/stop")
+            stop_frame["data"]["parent_message_id"] = root
+            stop_command = asyncio.create_task(adapter._handle_frame(json.dumps(stop_frame)))
+        elif outcome == "cancel":
+            sessions[root].cancel()
+        else:
+            release_turn.set()
+        if outcome in {"complete", "stop"}:
+            await asyncio.wait_for(in_send.wait(), 5)
+            if outcome == "stop":
+                assert False in states(root), "clear must precede the blocked /stop confirmation"
+        else:
+            await _wait_until(sessions[root].done)
+
+        root_count, chat_count, sibling_count = map(lambda scope: len(states(scope)), (root, None, sibling))
+        # The other scopes must still refresh even while send or command confirmation is stalled.
+        await _wait_until(lambda: len(states(None)) >= chat_count + 3 and
+                          len(states(sibling)) >= sibling_count + 3)
+        assert all(states(None)) and all(states(sibling))
+        assert True not in states(root)[root_count:]
+        release_send.set()
+        if stop_command is not None:
+            await asyncio.wait_for(stop_command, 5)
+        await _wait_until(sessions[root].done)
+        assert states(root)[-1] is False
+        assert all(body["chat_id"] == 7 for body in fake.posts("typing"))
+        if outcome in {"complete", "stop"}:
+            assert [(body["parent_message_id"], body["content"]) for body in fake.posts("thread-replies")] == [
+                (root, "finished" if outcome == "complete" else "stopped")
+            ]
+    finally:
+        release_send.set()
+        if stop_command is not None and not stop_command.done():
+            await adapter_mod.cancel_task(stop_command)
+        await adapter.cancel_background_tasks()
+        await adapter.disconnect()
+    assert not adapter._typing_paused
+    assert not adapter._typing_turns
+    assert states(None)[-1] is False and states(sibling)[-1] is False
+
+
+async def test_typing_stop_is_bounded_and_preserves_cancellation(make_adapter, monkeypatch):
+    adapter = await make_adapter()
+    adapter._http = object()
+    requested = asyncio.Event()
+    unwound = asyncio.Event()
+
+    async def slow_post(path, body):
+        requested.set()
+        try:
+            await asyncio.Future()
+        finally:
+            unwound.set()
+
+    monkeypatch.setattr(adapter, "_post", slow_post)
+    monkeypatch.setattr(adapter_mod, "_TYPING_TIMEOUT", 0.05)
+    await asyncio.wait_for(adapter.stop_typing("7", {"thread_id": "501"}), 1)
+    assert requested.is_set() and unwound.is_set()
+
+    requested.clear()
+    unwound.clear()
+    monkeypatch.setattr(adapter_mod, "_TYPING_TIMEOUT", 5)
+    stop = asyncio.create_task(adapter.stop_typing("7", {"thread_id": "501"}))
+    try:
+        await asyncio.wait_for(requested.wait(), 1)
+    finally:
+        stop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop
+    assert unwound.is_set()
+
+
 async def test_thread_reply_gets_root_context_once(make_adapter):
     adapter = await make_adapter()
     parent = {"message_id": 501, "sender": {"name": "alice"}, "text": "Fix the scroll bug"}
