@@ -488,3 +488,70 @@ async def test_manual_sethome_still_reaches_gateway(make_adapter, home_config):
     await adapter._handle_frame(json.dumps(_message_new(text="/sethome")))
     assert adapter.events[0].get_command() == "sethome"
     assert not home_config.exists()  # the gateway handles the explicit command and its target
+
+
+@pytest.mark.parametrize(("text", "language"), [
+    ("현재 작업 진행 상황을 한국어로 알려주세요", "ko"),
+    ("Please search the web and explain the results in detail", "en"),
+    ("この作業の進捗を教えてください", "ja"),
+    ("Por favor busca información sobre este tema y explica los resultados", "es"),
+    ("Veuillez rechercher les informations et expliquer les résultats", "fr"),
+    ("ok", None),
+    ("/approve", None),
+    ("```python\nprint('현재 작업 진행 상황을 알려주세요')\n```", None),
+    ("https://example.com/현재작업진행상황을알려주세요", None),
+])
+def test_detects_only_confident_user_prose(text, language):
+    assert adapter_mod.detect_language(text) == language
+
+
+async def test_language_follows_sender_and_thread_without_touching_output(make_adapter):
+    adapter = await make_adapter()
+    await adapter._handle_frame(json.dumps(_message_new("lang1", "현재 작업 진행 상황을 알려주세요")))
+    await adapter._handle_frame(json.dumps(_thread_reply("lang2", 602, "ok")))
+    other = _thread_reply("lang3", 603, "ok")
+    other["data"]["sender"]["id"] = 10
+    await adapter._handle_frame(json.dumps(other))
+    await adapter._handle_frame(json.dumps(_message_new("lang4", "ok", message_id=502)))
+    await adapter._handle_frame(json.dumps(_thread_reply("lang5", 605,
+        "Please search the web and explain the results in detail")))
+    await adapter._handle_frame(json.dumps(_thread_reply("lang6", 606, "/approve")))
+    assert [e.source.language for e in adapter.events] == ["ko", "ko", None, None, "en", "en"]
+    assert adapter.events[0].text == "현재 작업 진행 상황을 알려주세요"
+    from gateway.session import SessionSource
+    assert SessionSource.from_dict(adapter.events[-1].source.to_dict()).language == "en"
+
+
+async def test_language_does_not_use_thread_root_or_linked_messages(make_adapter):
+    adapter = await make_adapter()
+    frame = _thread_reply("lang1", 601, "ok", parent={
+        "text": "현재 작업 진행 상황을 한국어로 알려주세요", "sender": {"name": "someone else"}})
+    frame["data"]["linked_messages"] = [{"text": "この作業の進捗を教えてください"}]
+    await adapter._handle_frame(json.dumps(frame))
+    assert adapter.events[0].source.language is None
+
+
+async def test_real_gateway_delivery_localizes_progress_without_translating_commands(fake, make_adapter):
+    from agent.display import get_tool_verb
+    from gateway.platforms.base import BasePlatformAdapter
+    from gateway.session import build_session_key
+
+    adapter = await make_adapter()
+    assert await adapter.connect()
+    try:
+        command = "python check_status.py --language=en"
+        async def handler(event):
+            return f"💻 {await asyncio.to_thread(get_tool_verb, 'terminal')} `{command}`"
+        adapter.set_message_handler(handler)
+        for frame in [_message_new("ko", "현재 작업 진행 상황을 알려주세요"),
+                      _message_new("en", "Please check the current status of the background job", message_id=502)]:
+            await adapter._handle_frame(json.dumps(frame))
+        await asyncio.gather(*(BasePlatformAdapter._process_message_background(
+            adapter, event, build_session_key(event.source)) for event in adapter.events))
+        replies = fake.posts("thread-replies")
+        by_thread = {str(body["parent_message_id"]): body["content"] for body in replies}
+        assert "실행 중" in by_thread["501"]
+        assert "Running" in by_thread["502"]
+        assert all(command in body for body in by_thread.values())
+    finally:
+        await adapter.disconnect()

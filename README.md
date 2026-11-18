@@ -37,7 +37,7 @@ Restart the gateway:
 hermes gateway restart
 ```
 
-The plugin needs no extra packages: `httpx` and `websockets` ship with Hermes.
+The installer adds `langdetect` for local language detection; `httpx` and `websockets` ship with Hermes.
 
 If the same bot is still served by `donut_hermes.py` or `hermes-bridge`, stop that first. DonutChat keeps one
 event stream per bot, and two clients keep disconnecting each other.
@@ -55,6 +55,23 @@ event stream per bot, and two clients keep disconnecting each other.
 
 Which messages reach Hermes is decided in DonutChat by the bot's trigger mode, for example mentions only.
 Hermes then applies its own allowlist on top.
+
+### User language
+
+On Hermes versions supporting `SessionSource.language`, static progress labels and
+approval/status text follow the sender's own message language. Detection runs
+locally; no text is sent to a translation service. Short or ambiguous follow-ups,
+commands and attachments retain that sender's last detected language in the same
+thread (bounded in-memory cache). A new ambiguous thread uses Hermes' configured
+`display.language`; unsupported languages also fall back to that setting.
+Code blocks, inline code, URLs and quoted lines are excluded from detection.
+
+The language is carried on the session source for delayed background results.
+Concurrent users do not change one another's language. Hermes' existing catalogs
+supply the translated UI labels; commands, file paths and tool output are never
+rewritten. The platform prompt also asks the model to match the user's language in
+its interim explanations and answers. Older Hermes versions continue to use the
+configured display language; upgrading the plugin alone cannot add core support.
 
 ### Tool progress
 

@@ -30,6 +30,7 @@ from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any, Optional
 
+from .language import detect_language
 from gateway.config import Platform
 from gateway.platforms._shared import (
     env_is_connected, get_scoped_secret, seed_extra_from_env, send_error
@@ -137,6 +138,7 @@ class DonutAdapter(BasePlatformAdapter):
         # reply_id → (chat_id, parent_message_id): edits and reply_to need the thread root.
         self._replies: _Bounded = _Bounded(5000)
         self._threads_seen: _Bounded = _Bounded(5000)  # threads whose root text Hermes was given
+        self._languages: _Bounded = _Bounded(2000)  # (chat, thread, sender) → language
         self._chats: _Bounded = _Bounded(2000)  # chat_id → {"name", "type"}
 
     @property
@@ -438,6 +440,15 @@ class DonutAdapter(BasePlatformAdapter):
             raw_message=data, message_id=message_id, media_urls=media_urls, media_types=media_types,
             timestamp=datetime.datetime.now())
 
+        # Source-local preference: never mutate display.language or process environment.
+        # Older Hermes versions keep the configured display language until upgraded.
+        if "language" in event.source.__dataclass_fields__ and not event.source.is_bot:
+            key = (chat_id, thread_id, event.source.user_id)
+            detected = await asyncio.to_thread(detect_language, text)
+            if detected:
+                self._languages[key] = detected
+            event.source.language = self._languages.get(key)
+
         thread_key = f"{chat_id}:{thread_id}"
         parent = data.get("parent")
         if parent and thread_key not in self._threads_seen:
@@ -598,6 +609,8 @@ def interactive_setup() -> None:
 _PLATFORM_HINT = (
     "You are talking with your user in DonutChat. Each conversation is a DonutChat thread, and "
     "your replies are posted in it as Markdown (headings, lists, tables and code blocks render). "
+    "Match the user’s language in answers and interim progress explanations; keep commands, "
+    "paths, code and quoted output unchanged. "
     "For long work, start background processes or async delegation instead of blocking: when "
     "they finish you are woken in this same thread and your reply is delivered there, so you can "
     "say you will report back and actually do it. To attach an image (PNG, JPEG, GIF, WebP), a PDF "
@@ -611,7 +624,7 @@ def register(ctx) -> None:
         name="donut", label="DonutChat", adapter_factory=DonutAdapter,
         check_fn=check_requirements, validate_config=validate_config,
         is_connected=env_is_connected("DONUT_BOT_TOKEN"), required_env=["DONUT_BOT_TOKEN"],
-        install_hint="No extra packages needed (httpx and websockets ship with Hermes)",
+        install_hint="Install plugin requirements for local language detection (langdetect)",
         setup_fn=interactive_setup, env_enablement_fn=_env_enablement,
         cron_deliver_env_var="DONUT_HOME_CHANNEL", standalone_sender_fn=_standalone_send,
         allowed_users_env="DONUT_ALLOWED_USERS", allow_all_env="DONUT_ALLOW_ALL_USERS",
