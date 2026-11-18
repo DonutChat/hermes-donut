@@ -8,6 +8,8 @@ description: >
   long-running work (background processes, async delegation, cron,
   send_message) into the same thread.
 author: DonutChat
+python_dependencies:
+  - "langdetect>=1.0.9,<2"
 requires_env:
   - name: DONUT_BOT_TOKEN
     description: "DonutChat bot token (donutbot_…), from Settings → My bots"
